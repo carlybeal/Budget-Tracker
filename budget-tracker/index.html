@@ -735,7 +735,6 @@
         const qs = new URLSearchParams({ ...params, callback: cb }).toString();
         const s = document.createElement("script");
         s.id = cb; s.src = url + "?" + qs;
-        s.onerror = () => { cleanup(); reject(new Error("Script load failed")); };
         document.head.appendChild(s);
       });
     }
@@ -744,13 +743,36 @@
       if (!SHEET_URL) return Promise.reject(new Error("No sheet URL"));
       return jsonpRequest(SHEET_URL, { action: "load" });
     }
-    function saveToSheets(data) {
-      if (!SHEET_URL) return Promise.reject(new Error("No sheet URL"));
-      const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(data))));
-      return jsonpRequest(SHEET_URL, { action: "save", data: b64 });
-    }
     function pingSheets(url) {
       return jsonpRequest(url, { action: "ping" });
+    }
+
+    // ─── TARGETED SHEET SYNC CALLS ───
+    // Each function sends only what changed, keeping URLs small enough for JSONP.
+
+    function syncAddTx(tx) {
+      if (!SHEET_URL) return Promise.resolve();
+      return jsonpRequest(SHEET_URL, { action: "addTx", tx: JSON.stringify(tx) });
+    }
+    function syncUpdateTx(tx) {
+      if (!SHEET_URL) return Promise.resolve();
+      return jsonpRequest(SHEET_URL, { action: "updateTx", tx: JSON.stringify(tx) });
+    }
+    function syncDeleteTx(id) {
+      if (!SHEET_URL) return Promise.resolve();
+      return jsonpRequest(SHEET_URL, { action: "deleteTx", id: String(id) });
+    }
+    function syncCategories() {
+      if (!SHEET_URL) return Promise.resolve();
+      return jsonpRequest(SHEET_URL, { action: "saveCategories", categories: JSON.stringify(state.categories) });
+    }
+    function syncBudgets() {
+      if (!SHEET_URL) return Promise.resolve();
+      return jsonpRequest(SHEET_URL, { action: "saveBudgets", budgets: JSON.stringify(state.budgets) });
+    }
+    function syncSettings() {
+      if (!SHEET_URL) return Promise.resolve();
+      return jsonpRequest(SHEET_URL, { action: "saveSettings", settings: JSON.stringify({ rollover: state.rollover, budgetStart: state.budgetStart }) });
     }
 
     // ─── SAVE WITH DEBOUNCE ───
@@ -777,15 +799,23 @@
       return active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.tagName === 'SELECT');
     }
 
-    function scheduleSave() {
+    // scheduleSave is used for bulk changes (categories, budgets, settings, resets).
+    // Transaction adds/edits/deletes use the targeted helpers directly.
+    let pendingSync = {};
+
+    function scheduleSave(syncFns) {
       saveLocal();
       if (!SHEET_URL) return;
+      // Merge which sync functions are needed
+      if (syncFns) Object.assign(pendingSync, syncFns);
       clearTimeout(saveTimer);
       state.syncStatus = "saving";
       if (isUserEditing()) updateSyncBadge(); else render();
       saveTimer = setTimeout(async () => {
+        const fns = pendingSync;
+        pendingSync = {};
         try {
-          await saveToSheets({ transactions: state.transactions, categories: state.categories, budgets: state.budgets, rollover: state.rollover, budgetStart: state.budgetStart });
+          await Promise.all(Object.values(fns).map(fn => fn()));
           state.syncStatus = "synced";
         } catch { state.syncStatus = "error"; }
         if (isUserEditing()) updateSyncBadge(); else render();
@@ -1454,14 +1484,36 @@
       if (modal.type === "editTx") {
         const tx = state.transactions.find(t => t.id === modal.data.id);
         if (tx) { tx.amount = amt; tx.description = desc; tx.date = date; tx.category = cat; }
+        closeModal();
+        saveLocal();
+        if (SHEET_URL) {
+          state.syncStatus = "saving"; render();
+          syncUpdateTx(tx || { id: modal?.data?.id, amount: amt, description: desc, category: cat, date })
+            .then(() => { state.syncStatus = "synced"; render(); })
+            .catch(() => { state.syncStatus = "error"; render(); });
+        } else render();
       } else {
-        state.transactions.push({ id: Date.now(), amount: amt, description: desc, category: cat, date });
+        const newTx = { id: Date.now(), amount: amt, description: desc, category: cat, date };
+        state.transactions.push(newTx);
+        closeModal();
+        saveLocal();
+        if (SHEET_URL) {
+          state.syncStatus = "saving"; render();
+          syncAddTx(newTx)
+            .then(() => { state.syncStatus = "synced"; render(); })
+            .catch(() => { state.syncStatus = "error"; render(); });
+        } else render();
       }
-      closeModal(); scheduleSave();
     }
     function deleteTx(id) {
       state.transactions = state.transactions.filter(t => t.id !== id);
-      scheduleSave(); render();
+      saveLocal();
+      if (SHEET_URL) {
+        state.syncStatus = "saving"; render();
+        syncDeleteTx(id)
+          .then(() => { state.syncStatus = "synced"; render(); })
+          .catch(() => { state.syncStatus = "error"; render(); });
+      } else render();
     }
 
     let budgetInputTimer = null;
@@ -1474,7 +1526,7 @@
       clearTimeout(budgetInputTimer);
       saveLocal();
       budgetInputTimer = setTimeout(() => {
-        scheduleSave();
+        scheduleSave({ budgets: syncBudgets, settings: syncSettings });
       }, 1000);
     }
 
@@ -1484,7 +1536,7 @@
       if (state.rollover[catId] && !state.budgetStart[catId]) {
         state.budgetStart[catId] = state.selectedMonth;
       }
-      scheduleSave(); render();
+      scheduleSave({ settings: syncSettings }); render();
     }
 
     function openAddCat() { openModal("addCat", { label: "", icon: "📌", color: "#B0B0B0" }); }
@@ -1508,7 +1560,7 @@
         state.rollover[newId] = true;
         state.budgetStart[newId] = state.selectedMonth;
       }
-      closeModal(); scheduleSave();
+      closeModal(); scheduleSave({ cats: syncCategories });
     }
     function confirmDeleteCat(id) { openModal("confirmDelete", { catId: id }); }
     function deleteCat(id) {
@@ -1516,13 +1568,13 @@
       state.transactions.forEach(t => { if (t.category === id) t.category = fallback; });
       state.categories = state.categories.filter(c => c.id !== id);
       delete state.budgets[id];
-      closeModal(); scheduleSave();
+      closeModal(); scheduleSave({ cats: syncCategories, budgets: syncBudgets });
     }
     function moveCat(idx, dir) {
       const t = idx + dir;
       if (t < 0 || t >= state.categories.length) return;
       [state.categories[idx], state.categories[t]] = [state.categories[t], state.categories[idx]];
-      scheduleSave(); render();
+      scheduleSave({ cats: syncCategories }); render();
     }
 
     // ─── DRAG AND DROP (desktop) ───
@@ -1555,7 +1607,7 @@
         if (targetIdx !== dragIdx && !isNaN(targetIdx)) {
           const item = state.categories.splice(dragIdx, 1)[0];
           state.categories.splice(targetIdx, 0, item);
-          scheduleSave();
+          scheduleSave({ cats: syncCategories });
         }
       }
       dragIdx = null;
@@ -1615,7 +1667,7 @@
       if (touchCurrentOverIdx !== null && touchCurrentOverIdx !== touchDragIdx) {
         const item = state.categories.splice(touchDragIdx, 1)[0];
         state.categories.splice(touchCurrentOverIdx, 0, item);
-        scheduleSave();
+        scheduleSave({ cats: syncCategories });
       }
 
       touchDragIdx = null;
@@ -1626,13 +1678,13 @@
     function resetTransactions() {
       if (!confirm("Clear all transactions? This cannot be undone.")) return;
       state.transactions = [];
-      closeModal(); scheduleSave(); render();
+      closeModal(); scheduleSave({ cats: syncCategories, budgets: syncBudgets, settings: syncSettings }); render();
     }
 
     function resetBudgets() {
       if (!confirm("Reset all budgets to zero? This cannot be undone.")) return;
       state.budgets = {};
-      closeModal(); scheduleSave(); render();
+      closeModal(); scheduleSave({ budgets: syncBudgets }); render();
     }
 
     function resetCategories() {
@@ -1651,14 +1703,14 @@
       });
       state.budgets = newBudgets; state.rollover = newRollover; state.budgetStart = newStart;
       ensureRolloverDefaults();
-      closeModal(); scheduleSave(); render();
+      closeModal(); scheduleSave({ cats: syncCategories, budgets: syncBudgets, settings: syncSettings }); render();
     }
 
     function resetAll() {
       if (!confirm("Clear ALL data — transactions, budgets, and categories? This cannot be undone.")) return;
       state.transactions = []; state.budgets = {}; state.categories = [...DEFAULT_CATEGORIES]; state.rollover = {}; state.budgetStart = {};
       ensureRolloverDefaults();
-      closeModal(); scheduleSave(); render();
+      closeModal(); scheduleSave({ cats: syncCategories, budgets: syncBudgets, settings: syncSettings }); render();
     }
 
     async function refreshFromSheets() {

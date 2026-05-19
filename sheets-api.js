@@ -6,11 +6,40 @@ function doGet(e) {
         if (action === "ping") return jsonpResponse(callback, { ok: true });
         if (action === "load") return jsonpResponse(callback, loadAll());
 
-        if (action === "save") {
-            var encoded = e.parameter.data;
-            if (!encoded) return jsonpResponse(callback, { error: "No data parameter" });
-            var jsonStr = Utilities.newBlob(Utilities.base64Decode(encoded)).getDataAsString();
-            saveAll(JSON.parse(jsonStr));
+        // ── Transactions ──
+        if (action === "addTx") {
+            var tx = JSON.parse(e.parameter.tx);
+            addTransaction(tx);
+            return jsonpResponse(callback, { ok: true });
+        }
+        if (action === "updateTx") {
+            var tx = JSON.parse(e.parameter.tx);
+            updateTransaction(tx);
+            return jsonpResponse(callback, { ok: true });
+        }
+        if (action === "deleteTx") {
+            deleteTxById(Number(e.parameter.id));
+            return jsonpResponse(callback, { ok: true });
+        }
+
+        // ── Categories ──
+        if (action === "saveCategories") {
+            var cats = JSON.parse(e.parameter.categories);
+            saveCategories(cats);
+            return jsonpResponse(callback, { ok: true });
+        }
+
+        // ── Budgets ──
+        if (action === "saveBudgets") {
+            var budgets = JSON.parse(e.parameter.budgets);
+            saveBudgets(budgets);
+            return jsonpResponse(callback, { ok: true });
+        }
+
+        // ── Settings (rollover + budgetStart) ──
+        if (action === "saveSettings") {
+            var settings = JSON.parse(e.parameter.settings);
+            saveSettings(settings);
             return jsonpResponse(callback, { ok: true });
         }
 
@@ -117,23 +146,41 @@ function loadSettings() {
     return settings;
 }
 
-function saveAll(payload) {
-    if (payload.transactions) saveTransactions(payload.transactions);
-    if (payload.categories) saveCategories(payload.categories);
-    if (payload.budgets) saveBudgets(payload.budgets);
-    saveSettings({ rollover: payload.rollover || {}, budgetStart: payload.budgetStart || {} });
+// ── Per-record transaction helpers ──
+
+function addTransaction(tx) {
+    var sheet = getOrCreateSheet("Transactions", ["id", "amount", "description", "category", "date"]);
+    var lastRow = sheet.getLastRow();
+    sheet.getRange(lastRow + 1, 5).setNumberFormat("@");
+    sheet.getRange(lastRow + 1, 1, 1, 5).setValues([[tx.id, tx.amount, tx.description, tx.category, tx.date]]);
 }
 
-function saveTransactions(transactions) {
+function updateTransaction(tx) {
     var sheet = getOrCreateSheet("Transactions", ["id", "amount", "description", "category", "date"]);
-    if (sheet.getLastRow() > 1) sheet.getRange(2, 1, sheet.getLastRow() - 1, 5).clear();
-    if (transactions.length === 0) return;
-    var rows = transactions.map(function (t) {
-        return [t.id, t.amount, t.description, t.category, t.date];
-    });
-    sheet.getRange(2, 5, rows.length, 1).setNumberFormat("@");
-    sheet.getRange(2, 1, rows.length, 5).setValues(rows);
+    var data = sheet.getDataRange().getValues();
+    for (var i = 1; i < data.length; i++) {
+        if (Number(data[i][0]) === Number(tx.id)) {
+            sheet.getRange(i + 1, 5).setNumberFormat("@");
+            sheet.getRange(i + 1, 1, 1, 5).setValues([[tx.id, tx.amount, tx.description, tx.category, tx.date]]);
+            return;
+        }
+    }
+    // Not found — append as new
+    addTransaction(tx);
 }
+
+function deleteTxById(id) {
+    var sheet = getOrCreateSheet("Transactions", ["id", "amount", "description", "category", "date"]);
+    var data = sheet.getDataRange().getValues();
+    for (var i = data.length - 1; i >= 1; i--) {
+        if (Number(data[i][0]) === id) {
+            sheet.deleteRow(i + 1);
+            return;
+        }
+    }
+}
+
+// ── Full-replace helpers (categories/budgets/settings are small) ──
 
 function saveCategories(categories) {
     var sheet = getOrCreateSheet("Categories", ["id", "label", "icon", "color", "sort_order"]);
