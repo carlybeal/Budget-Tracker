@@ -419,6 +419,17 @@
       color: var(--text-muted);
     }
 
+    .rollover-start {
+      padding: 4px 6px;
+      border: 1.5px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface2);
+      color: var(--text);
+      font-size: 12px;
+      font-family: inherit;
+      outline: none;
+    }
+
     .budget-input {
       width: 80px;
       padding: 8px 10px;
@@ -1241,6 +1252,10 @@
             </span>
             Rollover unspent
           </button>
+          ${isRollover ? `<div style="display:flex;align-items:center;gap:6px;margin-top:6px;font-size:12px;color:var(--text-muted)">
+            Counting from
+            <select class="rollover-start" onchange="setRolloverStart('${cat.id}',this.value)">${rolloverStartOptions(cat.id)}</select>
+          </div>` : ''}
         </div>
       </div>`;
         });
@@ -1536,6 +1551,25 @@
       if (state.rollover[catId] && !state.budgetStart[catId]) {
         state.budgetStart[catId] = state.selectedMonth;
       }
+      scheduleSave({ settings: syncSettings }); render();
+    }
+
+    // Months offered as a rollover start: earliest transaction (or current start) through the later of today / the viewed month
+    function rolloverStartOptions(catId) {
+      const current = state.budgetStart[catId] || state.selectedMonth;
+      const keys = [current, state.selectedMonth, getMonthKey(new Date()), ...state.transactions.map(t => t.date.slice(0, 7))];
+      const first = keys.reduce((a, b) => (b < a ? b : a));
+      const last = keys.reduce((a, b) => (b > a ? b : a));
+      let html = "";
+      for (let cursor = first; cursor <= last; cursor = nextMonthKey(cursor)) {
+        const [y, m] = cursor.split("-").map(Number);
+        html = `<option value="${cursor}"${cursor === current ? " selected" : ""}>${MONTHS[m - 1]} ${y}</option>` + html;
+      }
+      return html;
+    }
+
+    function setRolloverStart(catId, monthKey) {
+      state.budgetStart[catId] = monthKey;
       scheduleSave({ settings: syncSettings }); render();
     }
 
